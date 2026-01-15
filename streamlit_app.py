@@ -5,7 +5,6 @@ import pandas as pd
 import numpy as np
 import easyocr
 import re
-import unicodedata
 import docx
 from PIL import Image
 from pdf2image import convert_from_bytes
@@ -26,6 +25,7 @@ if 'content' not in st.session_state:
 @st.cache_resource
 def load_resources():
     reader = easyocr.Reader(['ms', 'en'])
+    # Using a smaller model to save disk space and memory
     summarizer = pipeline("summarization", model="sshleifer/distilbart-cnn-12-6")
     st_model = SentenceTransformer('paraphrase-multilingual-MiniLM-L12-v2')
     
@@ -50,36 +50,59 @@ col1, col2 = st.columns([1, 1])
 
 with col1:
     st.subheader("📥 Input")
-    mode = st.selectbox("Method", ["Manual", "Image", "PDF", "Word"])
+    # Added "Camera" to the selection
+    mode = st.selectbox("Method", ["Manual", "Camera", "Image", "PDF", "Word"])
     text_out = ""
     
-    if mode == "Image":
-        up = st.file_uploader("Upload Image")
-        if up: text_out = " ".join([t[1] for t in reader.readtext(np.array(Image.open(up)))])
+    if mode == "Camera":
+        cam_image = st.camera_input("Take a photo of the news article")
+        if cam_image:
+            img = Image.open(cam_image)
+            with st.spinner("Extracting text from photo..."):
+                results = reader.readtext(np.array(img))
+                text_out = " ".join([t[1] for t in results])
+
+    elif mode == "Image":
+        up = st.file_uploader("Upload Image", type=['jpg', 'jpeg', 'png'])
+        if up: 
+            img = Image.open(up)
+            text_out = " ".join([t[1] for t in reader.readtext(np.array(img))])
+
     elif mode == "PDF":
-        up = st.file_uploader("Upload PDF")
+        up = st.file_uploader("Upload PDF", type=['pdf'])
         if up:
-            for pg in convert_from_bytes(up.read()):
-                text_out += " ".join([t[1] for t in reader.readtext(np.array(pg))]) + " "
+            with st.spinner("Processing PDF..."):
+                pages = convert_from_bytes(up.read())
+                for pg in pages:
+                    text_out += " ".join([t[1] for t in reader.readtext(np.array(pg))]) + " "
+
     elif mode == "Word":
-        up = st.file_uploader("Upload Word")
-        if up: text_out = "\n".join([p.text for p in docx.Document(up).paragraphs])
+        up = st.file_uploader("Upload Word", type=['docx'])
+        if up: 
+            doc = docx.Document(up)
+            text_out = "\n".join([p.text for p in doc.paragraphs])
     
-    if text_out: st.session_state['content'] = text_out
+    if text_out: 
+        st.session_state['content'] = text_out
     
-    final_text = st.text_area("Review Content:", value=st.session_state['content'], height=300)
+    final_text = st.text_area("Review/Edit Content:", value=st.session_state['content'], height=250)
     st.session_state['content'] = final_text
 
 with col2:
     st.subheader("🔍 Analysis")
     if final_text:
         if st.button("Run Prediction"):
-            with st.spinner("Analyzing..."):
-                # GNN Logic
+            with st.spinner("Analyzing News..."):
+                # 1. Translate to Malay for consistency
                 malay = GoogleTranslator(source='auto', target='ms').translate(final_text[:1000])
+                
+                # 2. Preprocess
                 clean = " ".join(re.sub(r'[^a-zA-Z0-9\s]', ' ', malay).lower().split())
+                
+                # 3. Create Embedding
                 emb = torch.tensor(st_model.encode([clean]), dtype=torch.float)
                 
+                # 4. Prepare GNN Data
                 data = HeteroData()
                 data['article'].x = emb
                 data['source'].x = torch.eye(len(le_source.classes_))
@@ -90,9 +113,17 @@ with col2:
                     prob = F.softmax(out['article'], dim=-1)
                     pred = out['article'].argmax(dim=-1).item()
                 
-                if pred == 1: st.success(f"REAL NEWS ({prob[0][1]*100:.1f}%)")
-                else: st.error(f"FAKE NEWS ({prob[0][0]*100:.1f}%)")
+                # 5. Display Result
+                if pred == 1: 
+                    st.success(f"✅ LIKELY REAL NEWS (Confidence: {prob[0][1]*100:.1f}%)")
+                else: 
+                    st.error(f"🚨 LIKELY FAKE NEWS (Confidence: {prob[0][0]*100:.1f}%)")
+                
+                # Summary Feature
+                with st.expander("Show Summary"):
+                    summary = summarizer(final_text[:1000], max_length=130, min_length=30, do_sample=False)
+                    st.write(summary[0]['summary_text'])
         
-        if st.button("Reset"):
+        if st.button("Clear All"):
             st.session_state['content'] = ""
             st.rerun()
