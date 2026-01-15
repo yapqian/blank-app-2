@@ -22,7 +22,6 @@ DetectorFactory.seed = 0
 # --- UI CONFIG ---
 st.set_page_config(page_title="Malay News AI Verification", layout="wide")
 
-# Initialize session state
 if 'raw_content' not in st.session_state:
     st.session_state['raw_content'] = ""
 if 'translated_content' not in st.session_state:
@@ -46,7 +45,7 @@ def load_resources():
 
 reader, st_model, gnn_model, le_source, known_sources = load_resources()
 
-# --- PREPROCESSING FUNCTIONS ---
+# --- PREPROCESSING ---
 @st.cache_data
 def get_malay_stopwords():
     url = "https://raw.githubusercontent.com/stopwords-iso/stopwords-ms/master/stopwords-ms.txt"
@@ -66,30 +65,23 @@ def clean_malay_text(text):
 # --- APP LAYOUT ---
 st.title("🛡️ Malay News Graph-AI Verifier")
 
-# --- NEW: SOURCE METADATA AT THE TOP ---
-# This replaces the sidebar version
+# 1. Source Metadata (Top Container)
 with st.container(border=True):
     st.subheader("1. Source Metadata")
-    user_source = st.text_input(
-        "Enter News Source URL or Name", 
-        placeholder="e.g. hmetro.com.my",
-        help="Type the source name. If it's not in our database, it will be treated as 'unknown'."
-    )
-    
+    user_source = st.text_input("Enter News Source (URL/Name)", placeholder="e.g. hmetro.com.my")
     source_to_use = "unknown"
     if user_source:
         clean_s = user_source.strip().lower()
         if clean_s in known_sources:
             source_to_use = clean_s
-            st.caption(f"✅ Recognized source: **{source_to_use}**")
+            st.caption(f"✅ Recognized: **{source_to_use}**")
         else:
-            st.caption("⚠️ Source not found in database. Using fallback mapping.")
+            st.caption("⚠️ Source not found. Using fallback mapping.")
     else:
         st.caption("ℹ️ No source provided. Defaulting to 'unknown'.")
 
-st.write("---") # Visual separator
+st.write("---")
 
-# --- EXTRACTION & ANALYSIS COLUMNS ---
 col1, col2 = st.columns([1, 1])
 
 with col1:
@@ -104,36 +96,70 @@ with col1:
     elif mode == "Image":
         up = st.file_uploader("Upload Image", type=['jpg','png','jpeg'])
         if up: extracted = " ".join([t[1] for t in reader.readtext(np.array(Image.open(up)))])
-    
-    # ... (PDF/Word logic remains the same)
+    elif mode == "PDF":
+        up = st.file_uploader("Upload PDF", type=['pdf'])
+        if up:
+            pages = convert_from_bytes(up.read())
+            extracted = " ".join([" ".join([t[1] for t in reader.readtext(np.array(p))]) for p in pages])
+    elif mode == "Word":
+        up = st.file_uploader("Upload Word", type=['docx'])
+        if up: extracted = "\n".join([p.text for p in docx.Document(up).paragraphs])
 
     if extracted: st.session_state['raw_content'] = extracted
-    st.session_state['raw_content'] = st.text_area("Raw Text Output", value=st.session_state['raw_content'], height=150)
+    st.session_state['raw_content'] = st.text_area("Step 1: Raw Text", value=st.session_state['raw_content'], height=150)
 
     if st.button("Translate to Malay"):
         if st.session_state['raw_content']:
-            lang = detect(st.session_state['raw_content'])
-            if lang != 'ms':
-                st.session_state['translated_content'] = GoogleTranslator(source='auto', target='ms').translate(st.session_state['raw_content'])
-            else:
-                st.session_state['translated_content'] = st.session_state['raw_content']
+            with st.spinner("Detecting language..."):
+                lang = detect(st.session_state['raw_content'])
+                if lang != 'ms':
+                    st.session_state['translated_content'] = GoogleTranslator(source='auto', target='ms').translate(st.session_state['raw_content'])
+                else:
+                    st.session_state['translated_content'] = st.session_state['raw_content']
 
 with col2:
-    st.subheader("🔍 3. Analysis")
-    review_text = st.text_area("Review Malay Translation", value=st.session_state['translated_content'], height=150)
+    st.subheader("🔍 3. Analysis & Results")
+    review_text = st.text_area("Step 2: Review Malay Text", value=st.session_state['translated_content'], height=150)
     st.session_state['translated_content'] = review_text
 
     btn_row = st.columns(2)
     if btn_row[0].button("Run Prediction", type="primary"):
-        if review_text:
-            cleaned = clean_malay_text(review_text)
-            emb = torch.tensor(st_model.encode([cleaned]), dtype=torch.float)
-            source_idx = le_source.transform([source_to_use])[0]
-            
-            # GNN Logic...
-            # (Assuming the rest of your GNN data setup here)
-            st.success("Analysis complete!")
-            
+        if not review_text:
+            st.warning("Please provide text first.")
+        else:
+            with st.spinner("GNN Predicting..."):
+                cleaned = clean_malay_text(review_text)
+                emb = torch.tensor(st_model.encode([cleaned]), dtype=torch.float)
+                source_idx = le_source.transform([source_to_use])[0]
+                
+                data = HeteroData()
+                data['article'].x = emb
+                data['source'].x = torch.eye(len(le_source.classes_))
+                data['article','published_by','source'].edge_index = torch.tensor([[0],[source_idx]])
+                
+                with torch.no_grad():
+                    out = gnn_model(data.x_dict, data.edge_index_dict)
+                    prob = F.softmax(out['article'], dim=-1)
+                    pred = out['article'].argmax(dim=-1).item()
+                
+                # --- NEW: DISPLAY RESULTS CODE ---
+                st.markdown("### Verification Result")
+                confidence = prob[0][pred].item() * 100
+                
+                if pred == 1:
+                    st.success(f"✅ **LIKELY REAL NEWS**")
+                    st.progress(confidence / 100)
+                    st.metric("Confidence Level", f"{confidence:.2f}%")
+                else:
+                    st.error(f"🚨 **LIKELY FAKE NEWS**")
+                    st.progress(confidence / 100)
+                    st.metric("Confidence Level", f"{confidence:.2f}%")
+                
+                with st.expander("Technical Details"):
+                    st.write(f"**Mapped Source:** {source_to_use}")
+                    st.write("**Preprocessed Text used for Embedding:**")
+                    st.info(cleaned)
+
     if btn_row[1].button("Reset App"):
         st.session_state['raw_content'] = ""
         st.session_state['translated_content'] = ""
