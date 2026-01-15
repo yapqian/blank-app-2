@@ -6,7 +6,7 @@ torch-geometric
 pandas
 numpy
 easyocr
-langdetect
+langdetect==1.0.9
 deep-translator
 sentence-transformers
 scikit-learn
