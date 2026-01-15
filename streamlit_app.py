@@ -26,7 +26,7 @@ if 'content' not in st.session_state:
 @st.cache_resource
 def load_resources():
     reader = easyocr.Reader(['ms', 'en'])
-    summarizer = pipeline("summarization", model="facebook/bart-large-cnn")
+    summarizer = pipeline("summarization", model="sshleifer/distilbart-cnn-12-6")
     st_model = SentenceTransformer('paraphrase-multilingual-MiniLM-L12-v2')
     
     df = pd.read_csv('final_merged_fake_news_data.csv')
